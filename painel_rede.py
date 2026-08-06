@@ -8,6 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from mac_vendor_lookup import MacLookup
 import speedtest
 
+#instalador de dependencia necessária
+#python -m pip install mac-vendor-lookup speedtest-cli
+
+
+
 # ==========================================
 # CONFIGURAÇÕES DA SUA REDE LOCAL
 # ==========================================
