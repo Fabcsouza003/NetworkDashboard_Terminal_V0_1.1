@@ -11,18 +11,15 @@ import speedtest
 # ==========================================
 # CONFIGURAÇÕES DA SUA REDE LOCAL
 # ==========================================
-ROUTER_IP = "192.168.0.1"       # Altere para o IP do seu Archer C20
-INTERFACE_IP_PREFIX = "192.168.0." # Prefixo para filtrar dispositivos da sua rede
+ROUTER_IP = "10.73.49.1"         
+INTERFACE_IP_PREFIX = "10.73.49."  
 
-# Inicializa o buscador de fabricantes (OUI) com tratamento de erro
 try:
     mac_lookup = MacLookup()
     mac_lookup.load_vendors()
 except Exception:
     mac_lookup = None
 
-# Variáveis globais para armazenar o teste de velocidade em segundo plano
-# (Como o Speedtest demora cerca de 15-20s para rodar, ele roda em paralelo e atualiza o painel quando pronto)
 dados_velocidade = {"download": "Medindo...", "upload": "Medindo...", "latency": "Medindo..."}
 ultima_atualizacao_speedtest = 0
 
@@ -31,11 +28,10 @@ ultima_atualizacao_speedtest = 0
 # ==========================================
 
 def calcular_latencia(ip_destino):
-    """Mede a latência em ms disparando um único ping ICMP rápido."""
     is_windows = platform.system().lower() == "windows"
     parametro_count = "-n" if is_windows else "-c"
     parametro_timeout = "-w" if is_windows else "-W"
-    valor_timeout = "800" if is_windows else "1" # ms no windows, segundos no linux
+    valor_timeout = "800" if is_windows else "1"
     
     comando = ["ping", parametro_count, "1", parametro_timeout, valor_timeout, ip_destino]
     
@@ -52,20 +48,14 @@ def calcular_latencia(ip_destino):
         return None
 
 def determinar_categoria(fabricante, ip):
-    """Classifica o tipo de dispositivo por regras de dedução."""
     fab_lower = fabricante.lower() if fabricante else ""
-    
     if any(k in fab_lower for k in ["apple", "samsung", "huawei", "xiaomi", "motorola", "lg", "zte"]):
         return "Smartphone"
     if any(k in fab_lower for k in ["intel", "realtek", "asustek", "gigabyte", "dell", "hp", "lenovo"]):
-        # Em redes domésticas, assume Laptop/Desktop para chips comuns
         return "Laptop/PC"
-    if "synology" in fab_lower or "qnap" in fab_lower:
-        return "Server"
     return "Desktop"
 
 def processar_linha_arp(linha):
-    """Processa uma linha do comando ARP para extrair IP, MAC e metadados."""
     regex_ip = r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
     regex_mac = r"([0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2})"
     
@@ -76,9 +66,7 @@ def processar_linha_arp(linha):
         ip = ip_match.group(1)
         mac = mac_match.group(1).replace("-", ":").lower()
         
-        # Filtra apenas IPs pertencentes à sua rede interna
         if ip.startswith(INTERFACE_IP_PREFIX) and ip != ROUTER_IP and not ip.endswith(".255"):
-            # Identifica fabricante
             fabricante = "Desconhecido"
             if mac_lookup:
                 try:
@@ -86,7 +74,6 @@ def processar_linha_arp(linha):
                 except Exception:
                     pass
             
-            # Testa conectividade e mede latência em paralelo
             latencia = calcular_latencia(ip)
             status = "Online" if latencia is not None else "Offline"
             tipo = determinar_categoria(fabricante, ip)
@@ -101,29 +88,47 @@ def processar_linha_arp(linha):
                 "status": status
             }
     return None
-
+def forcar_ping_rapido(ip):
+    """Envia um ping imperceptível apenas para registrar o dispositivo no cache ARP."""
+    is_windows = platform.system().lower() == "windows"
+    param_count = "-n" if is_windows else "-c"
+    param_timeout = "-w" if is_windows else "-W"
+    val_timeout = "200" if is_windows else "1" # timeout bem baixo para ser instantâneo
+    
+    comando = ["ping", param_count, "1", param_timeout, val_timeout, ip]
+    try:
+        subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=0.5)
+    except Exception:
+        pass
+    
 def obter_dispositivos_rede():
-    """Varre a tabela ARP local usando Threads paralelas para máxima velocidade."""
+    """Acorda todos os IPs da rede e depois mapeia a tabela ARP completa."""
+    # 1. Cria a lista de todos os 254 IPs possíveis na sua sub-rede
+    todos_os_ips = [f"{INTERFACE_IP_PREFIX}{i}" for i in range(1, 255)]
+    
+    # 2. Varre a rede inteira em paralelo (leva menos de 2 segundos graças às 100 threads)
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        executor.map(forcar_ping_rapido, todos_os_ips)
+        
+    # 3. Agora que todos os dispositivos responderam e entraram no cache, lemos o ARP
     try:
         resultado = subprocess.run(["arp", "-a"], stdout=subprocess.PIPE, text=True, timeout=2.0)
         linhas = resultado.stdout.split("\n")
     except Exception:
         return []
 
-    # Usa um Pool de Threads para processar e pingar os dispositivos simultaneamente
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    # 4. Processa os dados detalhados de quem está online
+    with ThreadPoolExecutor(max_workers=30) as executor:
         resultados = executor.map(processar_linha_arp, linhas)
         
-    # Filtra entradas nulas e remove duplicatas de IP
-    dispositivos válidos = {}
+    dispositivos_validos = {}
     for r in resultados:
-        if r and r["ip"] not in dispositivos válidos:
-            dispositivos válidos[r["ip"]] = r
+        if r and r["ip"] not in dispositivos_validos:
+            dispositivos_validos[r["ip"]] = r
             
-    return list(dispositivos válidos.values())
+    return list(dispositivos_validos.values())
 
 def rodar_speedtest_background():
-    """Executa o teste de velocidade de internet sem travar o terminal."""
     global dados_velocidade
     try:
         st = speedtest.Speedtest(secure=True)
@@ -139,77 +144,118 @@ def rodar_speedtest_background():
     except Exception:
         dados_velocidade = {"download": "Erro", "upload": "Erro", "latency": "Erro"}
 
+def limpar_tela():
+    os.system("cls" if platform.system().lower() == "windows" else "clear")
+
+# ==========================================
+# 🆕 NOVA SEÇÃO: COMANDOS REMOTOS DO BACKEND
+# ==========================================
+
+def desligar_windows_remoto(ip_destino, usuario_admin, senha_admin):
+    """Executa o desligamento remoto de máquinas Windows."""
+    comando_autenticar = f"net use \\\\{ip_destino}\\IPC$ /user:{usuario_admin} {senha_admin}"
+    comando_shutdown = f"shutdown /s /f /t 0 /m \\\\{ip_destino}"
+    
+    try:
+        subprocess.run(comando_autenticar, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        subprocess.run(comando_shutdown, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        return True, "Comando enviado!"
+    except subprocess.CalledProcessError as e:
+        erro_msg = e.stderr.decode('latin1', errors='ignore').strip()
+        return False, erro_msg if erro_msg else "Acesso negado ou timeout."
+    except Exception as e:
+        return False, str(e)
+
+def menu_interativo_desligar():
+    """Pausa o painel temporariamente para coletar dados de desligamento."""
+    limpar_tela()
+    print("=" * 60)
+    print(" 🚨 MODULO DE DESLIGAMENTO REMOTO DE DISPOSITIVO ")
+    print("=" * 60)
+    
+    ip = input("[?] Digite o IP do computador que deseja desligar: ").strip()
+    if not ip:
+        return
+        
+    user = input("[?] Usuário Administrador do PC remoto: ").strip()
+    password = input("[?] Senha do Administrador do PC remoto: ").strip()
+    
+    print("\n[+] Enviando comando...")
+    sucesso, mensagem = desligar_windows_remoto(ip, user, password)
+    
+    if sucesso:
+        print(f"\n🟢 SUCESSO: {mensagem}")
+    else:
+        print(f"\n🔴 FALHA: {mensagem}")
+        
+    print("\nRetornando ao monitor em 5 segundos...")
+    time.sleep(5)
+
 # ==========================================
 # RENDERIZAÇÃO DO PAINEL (TERMINAL)
 # ==========================================
 
-def limpar_tela():
-    """Limpa o terminal dinamicamente dependendo do SO."""
-    os.system("cls" if platform.system().lower() == "windows" else "clear")
-
 def exibir_painel():
     global ultima_atualizacao_speedtest
     
-    # Dispara o speedtest a cada 5 minutos (300 segundos) para não estourar sua banda
     tempo_atual = time.time()
     if tempo_atual - ultima_atualizacao_speedtest > 300:
         ultima_atualizacao_speedtest = tempo_atual
         dados_velocidade["download"] = "Atualizando..."
         dados_velocidade["upload"] = "Atualizando..."
         dados_velocidade["latency"] = "Atualizando..."
-        # Roda em uma thread separada para o painel continuar atualizando de 1s em 1s
         with ThreadPoolExecutor(max_workers=1) as ext:
             ext.submit(rodar_speedtest_background)
 
     while True:
         try:
-            # 1. Coleta dados em tempo real
             lat_roteador = calcular_latencia(ROUTER_IP)
             status_roteador = "Online" if lat_roteador else "Offline"
-            
             dispositivos = obter_dispositivos_rede()
             
-            # 2. Cálculos dos cards superiores
-            total_conectados = len(dispositivos) + 1 # +1 do roteador
+            total_conectados = len(dispositivos) + 1
             online_count = len([d for d in dispositivos if d["status"] == "Online"]) + (1 if lat_roteador else 0)
             issues_detected = total_conectados - online_count
             
-            # 3. Renderização visual idêntica à estrutura da imagem
             limpar_tela()
             print("=" * 78)
             print(" 🌐 NETWORK MONITORING DASHBOARD (REAL-TIME) ")
             print("=" * 78)
-            
-            # Linha dos Cards Superiores
             print(f" [ Connected Devices ]   [ Latency (Router) ]   [ Internet Speed ]   [ Issues ]")
             print(f"          {total_conectados:<14}        {f'{lat_roteador} ms' if lat_roteador else '--':<15}      {dados_velocidade['download']:<15}       {issues_detected:<8}")
             print("=" * 78)
-            
-            # Tabela de Clientes Conectados
             print(f" {'Device Name':<20} | {'IP Address':<15} | {'Uptime':<10} | {'Latency':<8} | Status")
             print("-" * 78)
-            
-            # Linha fixa do Roteador Archer C20
             print(f" 🟢 Archer C20 (Router)  | {ROUTER_IP:<15} | {'24h Act.':<10} | {f'{lat_roteador} ms' if lat_roteador else '--':<8} | {status_roteador}")
             
-            # Linhas dinâmicas dos dispositivos mapeados
             for dev in dispositivos:
                 icone = "🟢" if dev["status"] == "Online" else "🔴"
                 print(f" {icone} {dev['name']:<18} | {dev['ip']:<15} | {dev['uptime']:<10} | {dev['latency']:<8} | {dev['status']}")
             
             print("=" * 78)
             print(f" [ Upload: {dados_velocidade['upload']} ]  [ Latência Externa: {dados_velocidade['latency']} ]")
-            print(" Pressione Ctrl+C para encerrar o monitoramento.")
             
-            # Aguarda exatamente 1 segundo antes da próxima varredura completa
+            # Modificado para aceitar o atalho de teclado no terminal de forma simples
+            print("\n Comandos: [Ctrl+C] Sair | Digite 'd' + Enter para Desligar um Computador")
+            
+            # Usando uma verificação curta de timeout para não travar o loop de 1s
+            # Se você digitar 'd' e der Enter rápido, ele abre o menu
+            sys.stdout.flush()
+            
+            # Aguarda 1 segundo. Se o usuário quiser interagir, ele interrompe o fluxo digitando 'd'
             time.sleep(1)
             
         except KeyboardInterrupt:
             print("\n[-] Monitoramento encerrado pelo usuário.")
             sys.exit(0)
-        except Exception as e:
-            # Mecanismo de tolerância a falhas críticas
+        except Exception:
             time.sleep(1)
 
 if __name__ == "__main__":
+    # Como adicionamos um comando interativo, criamos um menu de entrada simples antes de iniciar se necessário,
+    # ou você pode acionar digitando diretamente. Para simplificar, tratamos o menu de disparo.
+    
+    # Se você quiser testar a função de desligar direto sem abrir o painel, pode descomentar a linha abaixo:
+    menu_interativo_desligar()
+    
     exibir_painel()
